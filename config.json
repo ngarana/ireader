@@ -1,0 +1,15 @@
+{
+  "ollama_host": "http://localhost:11434",
+  "ollama_model": "llama3.2:latest",
+  "piper_path": "/usr/bin/piper-tts",
+  "model_path": "./models",
+  "voice_model": "lessac/en_US/lessac-medium.onnx",
+  "output_format": "wav",
+  "chunk_size": 1000,
+  "overlap": 100,
+  "max_concurrent_tts": 2,
+  "gpu_acceleration": true,
+  "sample_rate": 22050,
+  "speed": 1.0,
+  "pitch": 1.0
+}

@@ -12,3 +12,6 @@ wheels/
 *.pdf
 .python-version
 models/
+piper/
+piper_linux_x86_64.tar.gz
+simple_test.txt

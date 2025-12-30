@@ -5,7 +5,7 @@ import os
 import sys
 
 # --- TUNING CONFIGURATION ---
-PDF_PATH = "pdf_file.pdf"
+PDF_PATH = "poem.pdf"
 MODEL_NAME = "llama3.2"
 VOICE_MODEL = "./models/voice.onnx"
 OUTPUT_AUDIO = "output.wav"
@@ -14,7 +14,7 @@ OUTPUT_AUDIO = "output.wav"
 PIPER_CMD = "piper-tts" # or "piper-tts" or "python -m piper"
 
 # Voice Tuning
-SPEAKING_SPEED = "1.1"      # 1.0 is normal. Higher = SLOWER. Lower = FASTER.
+SPEAKING_SPEED = "1"      # 1.0 is normal. Higher = SLOWER. Lower = FASTER.
 SENTENCE_PAUSE = "0.5"      # Seconds of silence between sentences.
 NOISE_WIDTH    = "0.667"    # 0.3 to 1.0. Higher = more "expressive/unstable".
 
@@ -33,7 +33,7 @@ def extract_text(pdf_path):
 def clean_text_with_ai(raw_text):
     print("[*] Thinking (Refining text for speech flow)...")
     
-    chunk_size = 4000 
+    chunk_size = 6000 
     cleaned_text = ""
     total_chunks = len(raw_text) // chunk_size + 1
     
@@ -56,9 +56,13 @@ def clean_text_with_ai(raw_text):
         """
         
         try:
-            response = ollama.chat(model=MODEL_NAME, messages=[
-                {'role': 'user', 'content': prompt},
-            ])
+            response = ollama.chat(
+                model=MODEL_NAME, 
+                messages=[{'role': 'user', 'content': prompt}],
+                options={
+                    'num_ctx': 8192, 
+                }
+            )
             content = response['message']['content']
             cleaned_text += content + " "
             print(f"    - Processed chunk {i//chunk_size + 1}/{total_chunks}")
