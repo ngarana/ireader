@@ -63,7 +63,7 @@ class SmartAudiobookReader:
         """Load configuration from file or use defaults."""
         default_config = {
             'ollama_host': 'http://localhost:11434',
-            'ollama_model': 'llama3.2:latest',
+            'ollama_model': 'llama3.1:8b', 
             'piper_path': 'piper',
             'model_path': './models',
             'voice_model': 'kristin/en_US/kristin-medium.onnx',
@@ -86,52 +86,120 @@ class SmartAudiobookReader:
     
     def analyze_document_structure(self, pdf_path: str) -> Dict[str, Any]:
         """
-        Analyze PDF to detect document type (Poetry vs Prose), Title, and Structure.
+        Analyze PDF to detect document type, Title, Author, and Metadata using visual hierarchy.
         """
         logger.info(f"Analyzing document structure: {pdf_path}")
         structure = {
-            'type': 'PROSE', # Default
+            'type': 'PROSE',
             'title': 'Unknown',
+            'author': None,
+            'metadata': [],
             'is_poetry': False
         }
         
         try:
             doc = fitz.open(pdf_path)
+            if len(doc) == 0:
+                return structure
+
+            page = doc[0]
+            blocks = page.get_text("dict")["blocks"]
             
-            # Simple heuristic: Check text density of first few pages
+            # 1. Parsing Blocks with Font Info
+            text_blocks = [] # List of {'text': str, 'size': float, 'y': float}
+            
+            for b in blocks:
+                if "lines" in b:
+                    block_text = ""
+                    max_size = 0.0
+                    y_pos = b["bbox"][1] # Top Y coordinate
+                    
+                    for l in b["lines"]:
+                        for s in l["spans"]:
+                            if s["text"].strip():
+                                block_text += s["text"] + " "
+                                if s["size"] > max_size:
+                                    max_size = s["size"]
+                    
+                    if block_text.strip():
+                        text_blocks.append({
+                            'text': block_text.strip(),
+                            'size': max_size,
+                            'y': y_pos
+                        })
+            
+            # Sort by Y position (top to bottom)
+            text_blocks.sort(key=lambda x: x['y'])
+            
+            if not text_blocks:
+                return structure
+
+            # 2. Identify Role based on Font Size
+            # Find the largest font (Title)
+            sizes = [b['size'] for b in text_blocks]
+            max_font_size = max(sizes) if sizes else 0
+            
+            # Find the "body" font size (mode)
+            # Round sizes to nearest 0.5 to group similar fonts
+            from collections import Counter
+            rounded_sizes = [round(s * 2) / 2 for s in sizes]
+            common_size = Counter(rounded_sizes).most_common(1)[0][0]
+            
+            logger.info(f"Max Font: {max_font_size}, Body Font ~{common_size}")
+            
+            # Assign roles
+            body_start_index = 0
+            
+            for i, block in enumerate(text_blocks):
+                # Heuristic: If we hit the body font size, and we are past the top few blocks, 
+                # assume body starts.
+                # Optimization: For poetry, lines can be short, so relying on len > 50 is risky.
+                # If the font size matches the common body size tightly, assume it is body.
+                
+                # Title is usually noticeably larger (e.g. +4pt)
+                is_title_candidate = block['size'] > common_size + 2
+                
+                if not is_title_candidate and abs(block['size'] - common_size) < 1.0:
+                    # If we found a block that matches body font size and isn't the main title
+                    # It's likely the start of body, especially if we have already seen a title
+                    if structure['title'] != 'Unknown':
+                         body_start_index = i
+                         break
+                    # Fallback: if we haven't seen a title yet, but this is the common font,
+                    # and it's not the very first block, it might be body.
+                    elif i > 0:
+                        body_start_index = i
+                        break
+            
+            # Everything before body_start is potentially Title/Author/Metadata
+            header_blocks = text_blocks[:body_start_index] if body_start_index > 0 else text_blocks[:1]
+            
+            # Extract specific fields from header blocks
+            for block in header_blocks:
+                # If it's the max size (or very close), it's the Title
+                if block['size'] >= max_font_size - 1:
+                    structure['title'] = block['text']
+                # If it's smaller than title but larger than body (or distinct), likely Author/Meta
+                elif block['size'] < max_font_size:
+                    if not structure['author']:
+                        # First non-title header is often Author
+                        structure['author'] = block['text']
+                    else:
+                        structure['metadata'].append(block['text'])
+
+            # 3. Detect Document Type (Visual Density Analysis on Body)
+            # Re-scan typical body pages
             total_lines = 0
             short_lines = 0
             total_chars = 0
             
-            # Check Title (largest font on Page 1)
-            if len(doc) > 0:
-                page = doc[0]
-                blocks = page.get_text("dict")["blocks"]
-                max_size = 0
-                title_text = ""
-                
-                for b in blocks:
-                    if "lines" in b:
-                        for l in b["lines"]:
-                            for s in l["spans"]:
-                                if s["size"] > max_size:
-                                    max_size = s["size"]
-                                    title_text = s["text"]
-                                    
-                if title_text:
-                    structure['title'] = title_text.strip()
-            
-            # Check Text Density to detect Poetry
-            # Sample first 3 pages
             for i in range(min(3, len(doc))):
-                page = doc[i]
-                text = page.get_text()
+                p = doc[i]
+                text = p.get_text()
                 lines = [l.strip() for l in text.split('\n') if l.strip()]
-                
                 total_lines += len(lines)
                 for line in lines:
                     total_chars += len(line)
-                    # Poetry strings tend to be shorter than full paragraph lines (e.g. < 60 chars)
                     if len(line) < 60:
                         short_lines += 1
             
@@ -140,74 +208,91 @@ class SmartAudiobookReader:
             avg_line_length = (total_chars / total_lines) if total_lines > 0 else 0
             short_line_ratio = (short_lines / total_lines) if total_lines > 0 else 0
             
-            logger.info(f"Doc Analysis: Avg Line Len={avg_line_length:.1f}, Short Line Ratio={short_line_ratio:.2f}")
-            
-            # Heuristic for Poetry:
-            # High ratio of "short" lines but not "tiny" (avoid TOC/Index)
-            # And average line length is moderate
             if short_line_ratio > 0.6 and avg_line_length < 60:
                 structure['type'] = 'POETRY'
                 structure['is_poetry'] = True
-                
-            logger.info(f"Detected Document Structure: {structure}")
+            
+            structure['header_end_y'] = text_blocks[body_start_index-1]['y'] + 10 if body_start_index > 0 else 0
+            
+            logger.info(f"Detailed Structure: {structure}")
             return structure
             
         except Exception as e:
             logger.warning(f"Structure analysis failed: {e}")
             return structure
 
-    def extract_text_from_pdf(self, pdf_path: str, is_poetry: bool = False) -> List[str]:
+    def extract_text_from_pdf(self, pdf_path: str, structure: Dict[str, Any]) -> List[str]:
         """
-        Extract text from PDF file and split into optimized chunks.
-        Respects 'is_poetry' flag to preserve line breaks.
+        Extract text, separating Introduction (Metadata) from Body.
         """
-        logger.info(f"Extracting text from PDF (Poetry Mode: {is_poetry})")
+        logger.info(f"Extracting text (Poetry Mode: {structure['is_poetry']})")
         
         if not os.path.exists(pdf_path):
             raise FileNotFoundError(f"PDF file not found: {pdf_path}")
         
+        # 1. Construct Intro Chunk
+        intro_text = f"Title: {structure['title']}. "
+        if structure['author']:
+            intro_text += f"By {structure['author']}. "
+        if structure['metadata']:
+            intro_text += " ".join(structure['metadata'])
+        
+        chunks = [intro_text]
+        
         try:
             doc = fitz.open(pdf_path)
-            full_text = ""
+            full_body_text = ""
             
+            # 2. Extract Body Text (Skipping Header on Page 1)
             for page_num in range(len(doc)):
                 page = doc[page_num]
-                text = page.get_text()
-                if text.strip():
-                    full_text += text + "\n"
+                
+                if page_num == 0 and structure.get('header_end_y', 0) > 0:
+                    # Clip extraction to start BELOW the header
+                    # rect = fitz.Rect(0, header_end_y, page.rect.width, page.rect.height)
+                    # Simple approach: Get all text, then fuzzy match removal or just rely on blocks
+                    # Better: Iterate blocks again and filter by Y
+                    blocks = page.get_text("blocks")
+                    for b in blocks:
+                        # b is (x0, y0, x1, y1, text, block_no, block_type)
+                        if b[1] > structure['header_end_y']:
+                            full_body_text += b[4] + "\n"
+                else:
+                    text = page.get_text()
+                    if text.strip():
+                        full_body_text += text + "\n"
             
             doc.close()
             
-            # Clean and split text into chunks
-            chunks = self._split_text_into_chunks(full_text, is_poetry)
-            logger.info(f"Extracted {len(chunks)} text chunks from PDF")
+            # 3. Chunk Body Text
+            body_chunks = self._split_text_into_chunks(full_body_text, structure['is_poetry'])
+            chunks.extend(body_chunks)
             
+            logger.info(f"Extracted {len(chunks)} chunks (1 intro + {len(body_chunks)} body)")
             return chunks
             
         except Exception as e:
-            logger.error(f"Error extracting text from PDF: {e}")
+            logger.error(f"Error extracting text: {e}")
             raise
     
     def _split_text_into_chunks(self, text: str, is_poetry: bool = False) -> List[str]:
         """
         Split text into optimized chunks.
-        If is_poetry is True, preserves newlines as meaningful pauses.
-        If is_poetry is False, normalizes newlines to spaces (except paragraphs).
+        Ensures strict semantic boundaries or sufficient overlap to prevent data loss.
         """
         chunks = []
         chunk_size = self.optimization_settings['chunk_size']
+        # We need substantial overlap if we break mid-flow
+        overlap_size = self.optimization_settings.get('overlap', 150)
         
         paragraphs = []
         
         if is_poetry:
-            # For poetry, treat blank lines as stanza breaks (paragraphs)
-            # We want to keep internal newlines for the LLM to see the structure
             raw_paras = text.replace('\r\n', '\n').split('\n\n')
             for p in raw_paras:
                 if p.strip():
                      paragraphs.append(p.strip())
         else:
-            # For prose, normalize single newlines to spaces
             raw_paras = text.replace('\r\n', '\n').split('\n\n')
             for p in raw_paras:
                 clean_p = p.replace('\n', ' ').strip()
@@ -217,26 +302,63 @@ class SmartAudiobookReader:
         current_chunk = ""
         
         for paragraph in paragraphs:
-            # Separator: Double newline for prose (para break), 
-            # or Double newline for poetry (stanza break)
             sep = "\n\n"
             
-            if len(current_chunk) + len(paragraph) + 2 > chunk_size:
-                if current_chunk:
-                    chunks.append(current_chunk)
-                    current_chunk = ""
-                
-                # Handle huge paragraphs
-                if len(paragraph) > chunk_size:
-                    # Logic similar to before but simpler
-                    chunks.append(paragraph[:chunk_size]) # Naive split for rare huge case
-                else:
-                    current_chunk = paragraph
-            else:
+            # If adding this paragraph fits, add it
+            if len(current_chunk) + len(paragraph) + 2 <= chunk_size:
                 if current_chunk:
                     current_chunk += sep + paragraph
                 else:
                     current_chunk = paragraph
+            else:
+                # Current chunk is full-ish. 
+                if current_chunk:
+                    chunks.append(current_chunk)
+                    # Start new chunk. 
+                    # If the PREVIOUS chunk ended cleanly on a paragraph, we ideally don't need context repetition
+                    # for the AudioReader (because it causes double-reading).
+                    # HOWEVER, for the LLM 'cleaning', it needs context.
+                    # The Context-Aware Prompting handles the "understanding". 
+                    # We should avoid putting overlapping text into the *output* unless we strip it later.
+                    # Since we don't have intelligent deduplication post-LLM, we should try to break cleanly.
+                    current_chunk = ""
+                
+                # If the paragraph itself is huge, we MUST split it with overlap
+                if len(paragraph) > chunk_size:
+                    # Split this specific paragraph
+                    sub_start = 0
+                    while sub_start < len(paragraph):
+                        sub_end = min(sub_start + chunk_size, len(paragraph))
+                        
+                        # Find a sentence boundary to avoid cutting mid-word if possible
+                        if sub_end < len(paragraph):
+                            # Look for sentence end in the last 20% of the chunk
+                            lookback = int(chunk_size * 0.2)
+                            search_area = paragraph[sub_end-lookback:sub_end]
+                            found_split = -1
+                            for punct in ['.', '!', '?']:
+                                idx = search_area.rfind(punct)
+                                if idx != -1:
+                                    found_split = (sub_end - lookback) + idx + 1
+                                    break
+                            
+                            if found_split != -1:
+                                sub_end = found_split
+                        
+                        sub_chunk = paragraph[sub_start:sub_end].strip()
+                        if sub_chunk:
+                            chunks.append(sub_chunk)
+                        
+                        # Prepare next sub-chunk
+                        if sub_end < len(paragraph):
+                            # No overlap logic here for *audio* generation unless we want repetition.
+                            # Standard TTS splitting usually just cuts.
+                            # But to prevent LLM from deleting "broken" starts, we can just proceed.
+                            sub_start = sub_end 
+                        else:
+                            break
+                else:
+                     current_chunk = paragraph
                     
         if current_chunk:
             chunks.append(current_chunk)
@@ -301,6 +423,28 @@ class SmartAudiobookReader:
                 
                 processed_text = response['message']['content'].strip()
                 
+                # Aggressive Post-Processing: Strip common bot introductions
+                # Even with strict prompts, smaller models sometimes can't help themselves.
+                import re
+                bot_intros = [
+                    r"^Here is the cleaned text:?",
+                    r"^Here is the text cleaned:?",
+                    r"^Here is the text with .*?:?",
+                    r"^Cleaned text:?",
+                    r"^Output:?",
+                    r"^Sure, here is.*?:",
+                    r"^I have cleaned.*?:",
+                    # Suffix patterns (multiline needed)
+                    r"I applied the following rules.*",
+                    r"Changes made:.*",
+                    r"Note:.*",
+                    r"Explanation:.*",
+                    r"I have removed.*",
+                ]
+                
+                for pattern in bot_intros:
+                    processed_text = re.sub(pattern, "", processed_text, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL).strip()
+
                 # Heuristic validation
                 if len(processed_text) < len(chunk) * 0.5 or len(processed_text) > len(chunk) * 1.5:
                     logger.warning(f"Chunk {i+1} processed text length suspicious. Using original.")
@@ -366,7 +510,7 @@ class SmartAudiobookReader:
         structure = self.analyze_document_structure(pdf_path)
         
         # 2. Extract text (aware of poetry mode)
-        text_chunks = self.extract_text_from_pdf(pdf_path, is_poetry=structure['is_poetry'])
+        text_chunks = self.extract_text_from_pdf(pdf_path, structure=structure)
         
         # 3. Start Pipeline
         chunk_queue = asyncio.Queue()

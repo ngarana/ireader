@@ -1,9 +1,9 @@
 {
   "ollama_host": "http://localhost:11434",
-  "ollama_model": "llama3.2:latest",
+  "ollama_model": "llama3.1:8b",
   "piper_path": "/usr/bin/piper-tts",
   "model_path": "./models",
-  "voice_model": "lessac/en_US/lessac-medium.onnx",
+  "voice_model": "kristin/en_US/kristin-medium.onnx",
   "output_format": "wav",
   "chunk_size": 1000,
   "overlap": 100,
