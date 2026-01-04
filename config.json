@@ -1,15 +1,15 @@
 {
   "ollama_host": "http://localhost:11434",
   "ollama_model": "llama3.1:8b",
-  "piper_path": "/usr/bin/piper-tts",
   "model_path": "./models",
-  "voice_model": "kristin/en_US/kristin-medium.onnx",
+  "kokoro_model": "kokoro-v1.0.onnx",
+  "kokoro_voices": "voices-v1.0.bin",
+  "voice": "af_sarah",
+  "lang": "en-us",
   "output_format": "wav",
   "chunk_size": 1000,
   "overlap": 100,
   "max_concurrent_tts": 2,
-  "gpu_acceleration": true,
-  "sample_rate": 22050,
-  "speed": 1.0,
-  "pitch": 1.0
+  "sample_rate": 24000,
+  "speed": 1.0
 }

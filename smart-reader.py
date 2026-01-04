@@ -1,22 +1,22 @@
 import fitz  # PyMuPDF
 import ollama
-import subprocess
 import os
 import sys
+import soundfile as sf
+from kokoro_onnx import Kokoro
 
 # --- TUNING CONFIGURATION ---
 PDF_PATH = "poem.pdf"
 MODEL_NAME = "llama3.2"
-VOICE_MODEL = "./models/voice.onnx"
+MODEL_PATH = "./models"
+KOKORO_MODEL = "kokoro-v1.0.onnx"
+KOKORO_VOICES = "voices-v1.0.bin"
 OUTPUT_AUDIO = "output.wav"
 
-# Piper Command Name (Change if you installed differently)
-PIPER_CMD = "piper-tts" # or "piper-tts" or "python -m piper"
-
 # Voice Tuning
-SPEAKING_SPEED = "1"      # 1.0 is normal. Higher = SLOWER. Lower = FASTER.
-SENTENCE_PAUSE = "0.5"      # Seconds of silence between sentences.
-NOISE_WIDTH    = "0.667"    # 0.3 to 1.0. Higher = more "expressive/unstable".
+VOICE = "af_sarah"  # See available voices at https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md
+LANG = "en-us"      # en-us, en-gb, fr-fr, it, ja, cmn
+SPEAKING_SPEED = 1.0  # 1.0 is normal. Higher = faster, Lower = slower
 
 def extract_text(pdf_path):
     print(f"[*] Reading {pdf_path}...")
@@ -73,26 +73,28 @@ def clean_text_with_ai(raw_text):
     return cleaned_text
 
 def generate_audio(text):
-    print("[*] Speaking (Generating audio with Piper)...")
-    
-    # Constructing the command with tuning flags
-    # Note: We pipe the text into piper using echo
-    command = (
-        f'echo "{text}" | {PIPER_CMD} '
-        f'--model {VOICE_MODEL} '
-        f'--output_file {OUTPUT_AUDIO} '
-        f'--length_scale {SPEAKING_SPEED} '
-        f'--sentence_silence {SENTENCE_PAUSE} '
-        f'--noise_w {NOISE_WIDTH}'
-    )
+    print("[*] Speaking (Generating audio with Kokoro TTS)...")
     
     try:
-        # We run this in shell=True so the pipe (|) works
-        subprocess.run(command, shell=True, check=True)
+        # Initialize Kokoro TTS
+        kokoro_model_path = os.path.join(MODEL_PATH, KOKORO_MODEL)
+        kokoro_voices_path = os.path.join(MODEL_PATH, KOKORO_VOICES)
+        kokoro = Kokoro(kokoro_model_path, kokoro_voices_path)
+        
+        # Generate speech
+        samples, sample_rate = kokoro.create(
+            text,
+            voice=VOICE,
+            speed=SPEAKING_SPEED,
+            lang=LANG
+        )
+        
+        # Save to file
+        sf.write(OUTPUT_AUDIO, samples, sample_rate)
         print(f"[*] Done! Audio saved to: {os.path.abspath(OUTPUT_AUDIO)}")
-    except subprocess.CalledProcessError:
-        print(f"\n[!] CRITICAL ERROR: Piper failed to run.")
-        print(f"    Command tried: {PIPER_CMD}")
+    except Exception as e:
+        print("\n[!] CRITICAL ERROR: Kokoro TTS failed to run.")
+        print(f"    Error: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":

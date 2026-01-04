@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Smart Audiobook Reader
-Optimized for Intel Core Ultra 7 (Meteor Lake) with iGPU acceleration
-Uses Ollama for text processing and Piper for TTS generation
+Optimized for Intel Core Ultra 7 (Meteor Lake)
+Uses Ollama for text processing and Kokoro TTS for speech generation
 """
 
 import os
@@ -10,17 +10,17 @@ import sys
 import json
 import time
 import asyncio
-import subprocess
 import tempfile
-import threading
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Generator
+from typing import Optional, List, Dict, Any
 import logging
 
 import fitz  # PyMuPDF
 import ollama
 import pygame
 from pygame import mixer
+import soundfile as sf
+from kokoro_onnx import Kokoro
 
 # Configure logging
 logging.basicConfig(
@@ -32,31 +32,34 @@ logger = logging.getLogger(__name__)
 class SmartAudiobookReader:
     """
     Smart Audiobook Reader that converts PDF files to audio using
-    Ollama for text processing and Piper for TTS generation.
-    Optimized for Intel Core Ultra 7 with iGPU acceleration.
+    Ollama for text processing and Kokoro TTS for speech generation.
+    Optimized for Intel Core Ultra 7.
     """
     
     def __init__(self, config_path: Optional[str] = None):
         """Initialize the Smart Audiobook Reader."""
         self.config = self._load_config(config_path)
         self.ollama_client = ollama.Client(host=self.config.get('ollama_host', 'http://localhost:11434'))
-        self.piper_path = self.config.get('piper_path', '/usr/bin/piper-tts')
         self.model_path = self.config.get('model_path', './models')
         self.temp_dir = tempfile.mkdtemp(prefix='ireader_')
         
+        # Initialize Kokoro TTS
+        kokoro_model = os.path.join(self.model_path, self.config.get('kokoro_model', 'kokoro-v1.0.onnx'))
+        kokoro_voices = os.path.join(self.model_path, self.config.get('kokoro_voices', 'voices-v1.0.bin'))
+        self.kokoro = Kokoro(kokoro_model, kokoro_voices)
+        
         # Initialize pygame mixer for audio playback
         pygame.init()
-        mixer.init(frequency=22050, size=-16, channels=2, buffer=512)
+        mixer.init(frequency=24000, size=-16, channels=1, buffer=512)
         
         # Optimization settings for Intel Core Ultra 7
         self.optimization_settings = {
             'chunk_size': self.config.get('chunk_size', 1000),  # characters per chunk
             'overlap': self.config.get('overlap', 100),  # characters overlap between chunks
             'max_concurrent_tts': self.config.get('max_concurrent_tts', 2),  # for Meteor Lake
-            'gpu_acceleration': self.config.get('gpu_acceleration', True)
         }
         
-        logger.info("Smart Audiobook Reader initialized")
+        logger.info("Smart Audiobook Reader initialized with Kokoro TTS")
         logger.info(f"Optimization settings: {self.optimization_settings}")
     
     def _load_config(self, config_path: Optional[str]) -> Dict[str, Any]:
@@ -64,17 +67,17 @@ class SmartAudiobookReader:
         default_config = {
             'ollama_host': 'http://localhost:11434',
             'ollama_model': 'llama3.1:8b', 
-            'piper_path': 'piper',
             'model_path': './models',
-            'voice_model': 'kristin/en_US/kristin-medium.onnx',
+            'kokoro_model': 'kokoro-v1.0.onnx',
+            'kokoro_voices': 'voices-v1.0.bin',
+            'voice': 'af_sarah',
+            'lang': 'en-us',
             'output_format': 'wav',
             'chunk_size': 1000,
             'overlap': 100,
             'max_concurrent_tts': 2,
-            'gpu_acceleration': True,
-            'sample_rate': 22050,
-            'speed': 1.0,
-            'pitch': 1.0
+            'sample_rate': 24000,
+            'speed': 1.0
         }
         
         if config_path and os.path.exists(config_path):
@@ -464,35 +467,21 @@ class SmartAudiobookReader:
         # Signal completion
         await queue.put(None)
 
-    def generate_speech_with_piper(self, text: str, output_path: str) -> bool:
+    def generate_speech_with_kokoro(self, text: str, output_path: str) -> bool:
         """
-        Generate speech from text using Piper TTS.
+        Generate speech from text using Kokoro TTS.
         """
         try:
-            cmd = [
-                self.piper_path,
-                '--model', f"{self.model_path}/{self.config['voice_model']}",
-                '--output_file', output_path,
-                '--sample_rate', str(self.config['sample_rate']),
-                '--speed', str(self.config['speed']),
-                '--pitch', str(self.config['pitch'])
-            ]
-            
-            if self.optimization_settings['gpu_acceleration']:
-                cmd.extend(['--use_gpu'])
-            
-            process = subprocess.Popen(
-                cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            samples, sample_rate = self.kokoro.create(
+                text,
+                voice=self.config.get('voice', 'af_sarah'),
+                speed=self.config.get('speed', 1.0),
+                lang=self.config.get('lang', 'en-us')
             )
             
-            stdout, stderr = process.communicate(input=text)
-            
-            if process.returncode == 0:
-                logger.debug(f"Generated speech: {output_path}")
-                return True
-            else:
-                logger.error(f"Piper error: {stderr}")
-                return False
+            sf.write(output_path, samples, sample_rate)
+            logger.debug(f"Generated speech: {output_path}")
+            return True
                 
         except Exception as e:
             logger.error(f"Error generating speech: {e}")
@@ -530,7 +519,7 @@ class SmartAudiobookReader:
                 try:
                     output_path = os.path.join(output_dir, f"chunk_{index:04d}.{self.config['output_format']}")
                     async with semaphore:
-                        success = await asyncio.to_thread(self.generate_speech_with_piper, text, output_path)
+                        success = await asyncio.to_thread(self.generate_speech_with_kokoro, text, output_path)
                         if success:
                             audio_files_map[index] = output_path
                 except Exception as e:
